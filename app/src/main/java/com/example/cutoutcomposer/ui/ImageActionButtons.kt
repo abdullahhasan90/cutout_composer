@@ -3,6 +3,7 @@ package com.example.cutoutcomposer.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -20,6 +21,7 @@ fun ImageActionButtons(
     onRoomCamera: () -> Unit,
     onObjectGallery: () -> Unit,
     onObjectCamera: () -> Unit,
+    onBrushToggle: () -> Unit,
     onExport: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -32,6 +34,13 @@ fun ImageActionButtons(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.End
         ) {
+            FloatingActionButton(
+                onClick = onBrushToggle,
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Icon(Icons.Default.Brush, contentDescription = "Brush Tool")
+            }
+            
             if (showRoomOptions) {
                 ActionOption(Icons.Default.PhotoLibrary, "Room Gallery", onRoomGallery)
                 ActionOption(Icons.Default.CameraAlt, "Room Camera", onRoomCamera)

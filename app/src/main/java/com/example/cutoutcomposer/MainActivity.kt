@@ -19,12 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.cutoutcomposer.ui.BrushControls
 import com.example.cutoutcomposer.ui.CompositorCanvas
 import com.example.cutoutcomposer.ui.ImageActionButtons
 import com.example.cutoutcomposer.ui.theme.CutoutComposerTheme
@@ -36,18 +38,24 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val viewModel: SceneViewModel = viewModel()
+            val state by viewModel.state.collectAsState()
             val isLoading by viewModel.isLoading.collectAsState()
             
-            var tempUri by remember { mutableStateOf<Uri?>(null) }
-            var cameraAction by remember { mutableStateOf<CameraTarget>(CameraTarget.NONE) }
+            // Use rememberSaveable to survive activity recreation (e.g., during camera trip)
+            var tempUriString by rememberSaveable { mutableStateOf<String?>(null) }
+            val tempUri = tempUriString?.let { Uri.parse(it) }
+            
+            var cameraAction by rememberSaveable { mutableStateOf(CameraTarget.NONE) }
 
             // Launchers
             val galleryLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.PickVisualMedia()
             ) { uri ->
                 uri?.let {
-                    if (cameraAction == CameraTarget.ROOM) viewModel.setRoomImage(this, it)
-                    else viewModel.setObjectImage(this, it)
+                    if (cameraAction == CameraTarget.ROOM) viewModel.setRoomImage(this@MainActivity, it)
+                    else viewModel.setObjectImage(this@MainActivity, it) {
+                        Toast.makeText(this@MainActivity, "Could not extract object. Try a clearer photo.", Toast.LENGTH_LONG).show()
+                    }
                 }
             }
 
@@ -56,8 +64,10 @@ class MainActivity : ComponentActivity() {
             ) { success ->
                 if (success) {
                     tempUri?.let {
-                        if (cameraAction == CameraTarget.ROOM) viewModel.setRoomImage(this, it)
-                        else viewModel.setObjectImage(this, it)
+                        if (cameraAction == CameraTarget.ROOM) viewModel.setRoomImage(this@MainActivity, it)
+                        else viewModel.setObjectImage(this@MainActivity, it) {
+                            Toast.makeText(this@MainActivity, "Could not extract object. Try a clearer photo.", Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
             }
@@ -67,7 +77,7 @@ class MainActivity : ComponentActivity() {
             ) { isGranted ->
                 if (isGranted) {
                     val uri = createImageUri()
-                    tempUri = uri
+                    tempUriString = uri.toString()
                     cameraLauncher.launch(uri)
                 }
             }
@@ -76,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 cameraAction = target
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                     val uri = createImageUri()
-                    tempUri = uri
+                    tempUriString = uri.toString()
                     cameraLauncher.launch(uri)
                 } else {
                     permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -91,24 +101,36 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize()
                         )
 
-                        ImageActionButtons(
-                            onRoomGallery = {
-                                cameraAction = CameraTarget.ROOM
-                                galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            onRoomCamera = { handleCameraAction(CameraTarget.ROOM) },
-                            onObjectGallery = {
-                                cameraAction = CameraTarget.OBJECT
-                                galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            },
-                            onObjectCamera = { handleCameraAction(CameraTarget.OBJECT) },
-                            onExport = {
-                                viewModel.exportResult(this@MainActivity) { uri ->
-                                    val msg = if (uri != null) "Saved to Gallery!" else "Failed to save."
-                                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                        if (!state.isBrushMode) {
+                            ImageActionButtons(
+                                onRoomGallery = {
+                                    cameraAction = CameraTarget.ROOM
+                                    galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                onRoomCamera = { handleCameraAction(CameraTarget.ROOM) },
+                                onObjectGallery = {
+                                    cameraAction = CameraTarget.OBJECT
+                                    galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                onObjectCamera = { handleCameraAction(CameraTarget.OBJECT) },
+                                onBrushToggle = { viewModel.toggleBrushMode() },
+                                onExport = {
+                                    viewModel.exportResult(this@MainActivity) { uri ->
+                                        val msg = if (uri != null) "Saved to Gallery!" else "Failed to save."
+                                        Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        } else {
+                            BrushControls(
+                                state = state,
+                                onRadiusChange = { viewModel.updateBrushSettings(it, state.isEraser) },
+                                onToggleEraser = { viewModel.updateBrushSettings(state.brushRadius, it) },
+                                onClearMask = { viewModel.clearMask() },
+                                onExit = { viewModel.toggleBrushMode() },
+                                modifier = Modifier.align(Alignment.BottomCenter)
+                            )
+                        }
 
                         if (isLoading) {
                             Box(
