@@ -21,6 +21,8 @@ import kotlinx.coroutines.withContext
 
 /**
  * ViewModel responsible for managing the transformation state of the cutout.
+ * All spatial properties (offset, brushRadius) are stored in "Bitmap Pixels"
+ * of the room background to ensure resolution independence.
  */
 class SceneViewModel : ViewModel() {
     private val _state = MutableStateFlow(SceneState())
@@ -65,11 +67,12 @@ class SceneViewModel : ViewModel() {
                             roomSubjects = subjects,
                             isBrushMode = false,
                             maskUpdateCount = currentState.maskUpdateCount + 1,
-                            showDebugSubjects = subjects.isNotEmpty()
+                            showDebugSubjects = subjects.isNotEmpty(),
+                            // Initialize offset to center of the bitmap
+                            offset = Offset(bitmap.width / 2f, bitmap.height / 2f)
                         ) 
                     }
 
-                    // Hide debug highlight after 3 seconds
                     if (subjects.isNotEmpty()) {
                         launch {
                             delay(3000)
@@ -94,20 +97,15 @@ class SceneViewModel : ViewModel() {
         viewModelScope.launch {
             _isLoading.value = true
             try {
-                // 1. Load the raw photo
                 val fullBitmap = withContext(Dispatchers.IO) {
                     BitmapUtils.loadAndDownsample(context, uri)
                 }
                 
                 if (fullBitmap != null) {
-                    // 2. Segment the object
                     val segmented = subjectSegmenter.segmentForeground(fullBitmap)
-                    
-                    // 3. Immediately recycle the full photo to save memory
                     fullBitmap.recycle()
                     
                     if (segmented != null) {
-                        // 4. Apply feathering
                         val feathered = withContext(Dispatchers.Default) {
                             BitmapUtils.applyAlphaBlur(segmented)
                         }
@@ -115,7 +113,8 @@ class SceneViewModel : ViewModel() {
                         _state.update { currentState ->
                             currentState.copy(
                                 cutout = feathered, 
-                                offset = Offset.Zero, 
+                                // Keep existing offset if room is already loaded, otherwise center
+                                offset = if (currentState.room != null) currentState.offset else Offset.Zero,
                                 scale = 1f, 
                                 rotation = 0f
                             ) 
@@ -139,12 +138,20 @@ class SceneViewModel : ViewModel() {
 
     /**
      * Updates the current transformation state.
+     * @param offsetDelta The pan delta in SCREEN pixels.
      */
-    fun updateTransform(offsetDelta: Offset, scaleFactor: Float, rotationDelta: Float) {
-        if (_state.value.isBrushMode) return
+    fun updateTransform(offsetDelta: Offset, scaleFactor: Float, rotationDelta: Float, canvasSize: Size) {
+        val state = _state.value
+        if (state.isBrushMode || state.room == null) return
+
+        // Convert screen delta to bitmap delta
+        val scaleX = state.room.width.toFloat() / canvasSize.width
+        val scaleY = state.room.height.toFloat() / canvasSize.height
+        val bitmapDelta = Offset(offsetDelta.x * scaleX, offsetDelta.y * scaleY)
+
         _state.update { currentState ->
             currentState.copy(
-                offset = currentState.offset + offsetDelta,
+                offset = currentState.offset + bitmapDelta,
                 scale = (currentState.scale * scaleFactor).coerceIn(0.1f, 10f),
                 rotation = (currentState.rotation + rotationDelta) % 360f
             )
@@ -172,7 +179,7 @@ class SceneViewModel : ViewModel() {
         val state = _state.value
         val mask = state.fgMask ?: return
         mask.eraseColor(Color.TRANSPARENT)
-        _state.update { it.copy(maskUpdateCount = it.maskUpdateCount + 1) }
+        _state.update { it.copy(fgMask = mask, maskUpdateCount = it.maskUpdateCount + 1) }
     }
 
     /**
@@ -192,7 +199,6 @@ class SceneViewModel : ViewModel() {
             val canvas = Canvas(mask)
             val paint = if (state.isEraser) eraserPaint else maskPaint
             
-            // Smart Snapping Logic
             var snapped = false
             if (!state.isEraser) {
                 for (subject in state.roomSubjects) {
@@ -204,9 +210,9 @@ class SceneViewModel : ViewModel() {
                 }
             }
 
-            // Manual Brush Fallback
             if (!snapped) {
-                canvas.drawCircle(bitmapX, bitmapY, state.brushRadius * scaleX, paint)
+                // Brush radius is already in bitmap units now
+                canvas.drawCircle(bitmapX, bitmapY, state.brushRadius, paint)
             }
 
             _state.update { it.copy(maskUpdateCount = it.maskUpdateCount + 1) }
@@ -217,7 +223,7 @@ class SceneViewModel : ViewModel() {
         if (x < subject.x || y < subject.y || x >= subject.x + subject.bitmap.width || y >= subject.y + subject.bitmap.height) {
             return false
         }
-        val radius = 10 // Checking a 21x21 area for better snapping feel
+        val radius = 10
         for (dx in -radius..radius) {
             for (dy in -radius..radius) {
                 val checkX = (x + dx - subject.x).toInt()
@@ -256,9 +262,13 @@ class SceneViewModel : ViewModel() {
                             val matrix = Matrix()
                             val pivotX = cutout.width / 2f
                             val pivotY = cutout.height / 2f
+                            
+                            // Transform using Bitmap-space coordinates
                             matrix.postScale(currentState.scale, currentState.scale, pivotX, pivotY)
                             matrix.postRotate(currentState.rotation, pivotX, pivotY)
-                            matrix.postTranslate(currentState.offset.x, currentState.offset.y)
+                            // Subtracting pivot ensures the object center matches the offset point
+                            matrix.postTranslate(currentState.offset.x - pivotX, currentState.offset.y - pivotY)
+                            
                             canvas.drawBitmap(cutout, matrix, null)
                         }
 
@@ -291,5 +301,14 @@ class SceneViewModel : ViewModel() {
                 _isLoading.value = false
             }
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        val state = _state.value
+        state.room?.recycle()
+        state.cutout?.recycle()
+        state.fgMask?.recycle()
+        state.roomSubjects.forEach { it.bitmap.recycle() }
     }
 }

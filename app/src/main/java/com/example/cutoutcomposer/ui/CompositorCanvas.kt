@@ -7,8 +7,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.toRect
 import androidx.compose.ui.graphics.BlendMode
@@ -20,10 +22,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import com.example.cutoutcomposer.SceneViewModel
+import kotlin.math.min
 
 /**
- * A custom Canvas that draws the room and the cutout object,
- * and handles transformations or painting via gestures.
+ * A custom Canvas that draws the room and the cutout object.
+ * Background is drawn using "Fit" scale (preserving aspect ratio) to avoid stretching.
  */
 @Composable
 fun CompositorCanvas(
@@ -32,93 +35,132 @@ fun CompositorCanvas(
 ) {
     val state by viewModel.state.collectAsState()
 
-    Canvas(
-        modifier = modifier
-            .fillMaxSize()
-            .pointerInput(state.isBrushMode) {
-                if (state.isBrushMode) {
-                    // Combine tap and drag to avoid gesture cancellation
-                    detectDragGestures(
-                        onDragStart = { offset -> viewModel.paintAt(offset, size.toSize()) },
-                        onDrag = { change, _ -> 
-                            viewModel.paintAt(change.position, size.toSize())
-                            change.consume()
+    key(state.maskUpdateCount) {
+        Canvas(
+            modifier = modifier
+                .fillMaxSize()
+                .pointerInput(state.isBrushMode, state.room) {
+                    val room = state.room ?: return@pointerInput
+                    
+                    // Calculate "Fit" scale and offset
+                    val canvasSize = size.toSize()
+                    val bitmapSize = Size(room.width.toFloat(), room.height.toFloat())
+                    val scale = min(canvasSize.width / bitmapSize.width, canvasSize.height / bitmapSize.height)
+                    val contentSize = bitmapSize * scale
+                    val dx = (canvasSize.width - contentSize.width) / 2f
+                    val dy = (canvasSize.height - contentSize.height) / 2f
+
+                    if (state.isBrushMode) {
+                        detectDragGestures(
+                            onDragStart = { offset -> 
+                                viewModel.paintAt(
+                                    screenOffset = offset - Offset(dx, dy), 
+                                    canvasSize = contentSize
+                                ) 
+                            },
+                            onDrag = { change, _ -> 
+                                viewModel.paintAt(
+                                    screenOffset = change.position - Offset(dx, dy), 
+                                    canvasSize = contentSize
+                                )
+                                change.consume()
+                            }
+                        )
+                    } else {
+                        detectTransformGestures { _, pan, zoom, rotation ->
+                            viewModel.updateTransform(
+                                offsetDelta = pan, 
+                                scaleFactor = zoom, 
+                                rotationDelta = rotation, 
+                                canvasSize = contentSize
+                            )
                         }
-                    )
-                } else {
-                    detectTransformGestures { _, pan, zoom, rotation ->
-                        viewModel.updateTransform(pan, zoom, rotation)
                     }
                 }
-            }
-    ) {
-        // Layer 0: Room Background
-        state.room?.let { bitmap ->
+        ) {
+            val room = state.room ?: return@Canvas
+            val roomWidth = room.width.toFloat()
+            val roomHeight = room.height.toFloat()
+            
+            // Calculate "Fit" scale and offset for rendering
+            val canvasWidth = size.width
+            val canvasHeight = size.height
+            val scale = min(canvasWidth / roomWidth, canvasHeight / roomHeight)
+            val drawnWidth = roomWidth * scale
+            val drawnHeight = roomHeight * scale
+            val dx = (canvasWidth - drawnWidth) / 2f
+            val dy = (canvasHeight - drawnHeight) / 2f
+            
+            val contentRect = Rect(dx, dy, dx + drawnWidth, dy + drawnHeight)
+
+            // Layer 0: Room Background (Preserving Aspect Ratio)
             drawImage(
-                image = bitmap.asImageBitmap(),
-                dstSize = IntSize(size.width.toInt(), size.height.toInt())
+                image = room.asImageBitmap(),
+                dstOffset = IntOffset(dx.toInt(), dy.toInt()),
+                dstSize = IntSize(drawnWidth.toInt(), drawnHeight.toInt())
             )
-        }
 
-        // Layer 1: Cutout Object
-        state.cutout?.let { bitmap ->
-            withTransform({
-                translate(state.offset.x, state.offset.y)
-                val pivot = Offset(bitmap.width / 2f, bitmap.height / 2f)
-                rotate(state.rotation, pivot = pivot)
-                scale(state.scale, state.scale, pivot = pivot)
-            }) {
-                drawImage(image = bitmap.asImageBitmap())
+            // Layer 1: Cutout Object
+            state.cutout?.let { cutoutBitmap ->
+                val pivotX = cutoutBitmap.width / 2f
+                val pivotY = cutoutBitmap.height / 2f
+                
+                // Project Bitmap-space coordinates to Screen-space (relative to drawn background)
+                val screenX = dx + (state.offset.x * scale)
+                val screenY = dy + (state.offset.y * scale)
+
+                withTransform({
+                    translate(screenX, screenY)
+                    rotate(state.rotation, pivot = Offset.Zero)
+                    scale(state.scale * scale, state.scale * scale, pivot = Offset.Zero)
+                    translate(-pivotX, -pivotY)
+                }) {
+                    drawImage(image = cutoutBitmap.asImageBitmap())
+                }
             }
-        }
 
-        // Layer 2: Foreground Occlusion
-        state.room?.let { roomBitmap ->
+            // Layer 2: Foreground Occlusion
             state.fgMask?.let { maskBitmap ->
                 drawIntoCanvas { canvas ->
-                    canvas.saveLayer(size.toRect(), Paint())
+                    // Clip the occlusion layer to only the background area
+                    canvas.saveLayer(contentRect, Paint())
                     
                     drawImage(
                         image = maskBitmap.asImageBitmap(),
-                        dstSize = IntSize(size.width.toInt(), size.height.toInt())
+                        dstOffset = IntOffset(dx.toInt(), dy.toInt()),
+                        dstSize = IntSize(drawnWidth.toInt(), drawnHeight.toInt())
                     )
                     
                     drawImage(
-                        image = roomBitmap.asImageBitmap(),
-                        dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+                        image = room.asImageBitmap(),
+                        dstOffset = IntOffset(dx.toInt(), dy.toInt()),
+                        dstSize = IntSize(drawnWidth.toInt(), drawnHeight.toInt()),
                         blendMode = BlendMode.SrcIn
                     )
                     
                     canvas.restore()
                 }
             }
-        }
 
-        // Debug Layer: Highlight detected subjects for 3 seconds
-        if (state.showDebugSubjects) {
-            state.roomSubjects.forEach { subject ->
-                val scaleX = size.width / (state.room?.width ?: 1)
-                val scaleY = size.height / (state.room?.height ?: 1)
-                
-                drawImage(
-                    image = subject.bitmap.asImageBitmap(),
-                    dstOffset = IntOffset(
-                        (subject.x * scaleX).toInt(),
-                        (subject.y * scaleY).toInt()
-                    ),
-                    dstSize = IntSize(
-                        (subject.bitmap.width * scaleX).toInt(),
-                        (subject.bitmap.height * scaleY).toInt()
-                    ),
-                    alpha = 0.5f,
-                    blendMode = BlendMode.Screen
-                )
+            // Debug Layer: Highlight detected subjects
+            if (state.showDebugSubjects) {
+                state.roomSubjects.forEach { subject ->
+                    drawImage(
+                        image = subject.bitmap.asImageBitmap(),
+                        dstOffset = IntOffset(
+                            (dx + subject.x * scale).toInt(),
+                            (dy + subject.y * scale).toInt()
+                        ),
+                        dstSize = IntSize(
+                            (subject.bitmap.width * scale).toInt(),
+                            (subject.bitmap.height * scale).toInt()
+                        ),
+                        alpha = 0.5f,
+                        blendMode = BlendMode.Screen
+                    )
+                }
             }
         }
-        
-        // Force redraw on mask update by reading maskUpdateCount in the draw scope
-        @Suppress("UNUSED_VARIABLE")
-        val forceRedraw = state.maskUpdateCount
     }
 }
 
